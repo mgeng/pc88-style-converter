@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PC-88 風 画像変換 (Step 4)</title>
+<title>PC-88 風 画像変換 (Step 5)</title>
 <style>
   body {
     background: #111;
@@ -51,22 +51,16 @@
   }
   .slider input[type=range] { width: 160px; }
   .slider .val { color: #6cf; }
-  /* 出力キャンバスはくっきり拡大表示 (PC-88 のドット感) */
   #out {
-    image-rendering: pixelated;
-    image-rendering: crisp-edges;
     border: 1px solid #444;
     background: #000;
-    /* 640x200 を CSS で横1倍・縦2倍相当に見せる (縦長ドット再現) */
-    width: 640px;
-    height: 400px;
     max-width: 100%;
   }
   .hint { color: #888; font-size: 12px; }
 </style>
 </head>
 <body>
-  <h1>PC-88 風 画像変換 — Step 4 (アナログ8色パレット追加)</h1>
+  <h1>PC-88 風 画像変換 — Step 5 (走査線オーバーレイ追加)</h1>
 
   <div class="controls">
     <input type="file" id="file" accept="image/*">
@@ -98,9 +92,16 @@
     </label>
     <button id="reset">リセット</button>
   </div>
+  <div class="sliders">
+    <label class="slider">
+      <span>走査線 <input type="checkbox" id="scanline" checked></span>
+      強度 <span class="val" id="scanlineVal">40</span>%
+      <input type="range" id="scanlineStrength" min="10" max="80" value="40">
+    </label>
+  </div>
   <p class="hint">画像を選ぶと 640x200・8色・ディザで変換し、縦2倍で表示します。スライダーで前処理を調整できます。</p>
 
-  <canvas id="out" width="640" height="200"></canvas>
+  <canvas id="out" width="640" height="400"></canvas>
 
 <script>
 (() => {
@@ -108,14 +109,23 @@
 
   const WIDTH = 640;
   const HEIGHT = 200;
+  const DISP_HEIGHT = 400; // 表示高さ (縦長ドット再現のため HEIGHT x2)
 
   const fileInput = document.getElementById('file');
   const paletteSel = document.getElementById('palette');
   const ditherSel = document.getElementById('dither');
   const downloadBtn = document.getElementById('download');
   const resetBtn = document.getElementById('reset');
+  const scanlineChk = document.getElementById('scanline');
+  const scanlineSlider = document.getElementById('scanlineStrength');
+  const scanlineVal = document.getElementById('scanlineVal');
   const outCanvas = document.getElementById('out');
   const outCtx = outCanvas.getContext('2d');
+
+  // ディザ処理用オフスクリーン (640x200)
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = WIDTH; offCanvas.height = HEIGHT;
+  const offCtx = offCanvas.getContext('2d');
 
   // 前処理スライダー (-100..100, 0 = 無変換)
   const sliders = {
@@ -315,7 +325,22 @@
       default:      ditherBayer(src, out, palette, amount); break;
     }
 
-    outCtx.putImageData(dst, 0, 0);
+    // ディザ結果をオフスクリーンへ書き込む
+    offCtx.putImageData(dst, 0, 0);
+
+    // 表示キャンバスへ補間なしで縦2倍に描画 (縦長ドット再現)
+    outCtx.imageSmoothingEnabled = false;
+    outCtx.drawImage(offCanvas, 0, 0, WIDTH, DISP_HEIGHT);
+
+    // 走査線オーバーレイ: 1px おきに半透明の黒帯を引く
+    if (scanlineChk.checked) {
+      const alpha = +scanlineSlider.value / 100;
+      outCtx.fillStyle = `rgba(0,0,0,${alpha})`;
+      for (let y = 1; y < DISP_HEIGHT; y += 2) {
+        outCtx.fillRect(0, y, WIDTH, 1);
+      }
+    }
+
     downloadBtn.disabled = false;
   }
 
@@ -343,9 +368,14 @@
     img.src = URL.createObjectURL(file);
   });
 
-  // ディザ方式・パレットを変えたら同じ画像で再変換
+  // ディザ方式・パレット・走査線を変えたら同じ画像で再変換
   ditherSel.addEventListener('change', convert);
   paletteSel.addEventListener('change', convert);
+  scanlineChk.addEventListener('change', convert);
+  scanlineSlider.addEventListener('input', () => {
+    scanlineVal.textContent = scanlineSlider.value;
+    convert();
+  });
 
   // スライダー: 値表示を更新して再変換
   for (const key of Object.keys(sliders)) {
