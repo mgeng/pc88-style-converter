@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PC-88 風 画像変換 (Step 2)</title>
+<title>PC-88 風 画像変換 (Step 3)</title>
 <style>
   body {
     background: #111;
@@ -37,6 +37,20 @@
   }
   label { font-size: 13px; }
   button:hover { background: #333; }
+  .sliders {
+    margin: 8px 0;
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .slider {
+    display: flex;
+    flex-direction: column;
+    font-size: 12px;
+    gap: 2px;
+  }
+  .slider input[type=range] { width: 160px; }
+  .slider .val { color: #6cf; }
   /* 出力キャンバスはくっきり拡大表示 (PC-88 のドット感) */
   #out {
     image-rendering: pixelated;
@@ -52,7 +66,7 @@
 </style>
 </head>
 <body>
-  <h1>PC-88 風 画像変換 — Step 2 (デジタル8色 + ディザ方式切替)</h1>
+  <h1>PC-88 風 画像変換 — Step 3 (前処理スライダー追加)</h1>
 
   <div class="controls">
     <input type="file" id="file" accept="image/*">
@@ -65,7 +79,20 @@
     </label>
     <button id="download" disabled>PNG 保存</button>
   </div>
-  <p class="hint">画像を選ぶと 640x200・8色・ディザで変換し、縦2倍で表示します。</p>
+
+  <div class="sliders">
+    <label class="slider">明るさ <span class="val" id="brightnessVal">0</span>
+      <input type="range" id="brightness" min="-100" max="100" value="0">
+    </label>
+    <label class="slider">コントラスト <span class="val" id="contrastVal">0</span>
+      <input type="range" id="contrast" min="-100" max="100" value="0">
+    </label>
+    <label class="slider">彩度 <span class="val" id="saturationVal">0</span>
+      <input type="range" id="saturation" min="-100" max="100" value="0">
+    </label>
+    <button id="reset">リセット</button>
+  </div>
+  <p class="hint">画像を選ぶと 640x200・8色・ディザで変換し、縦2倍で表示します。スライダーで前処理を調整できます。</p>
 
   <canvas id="out" width="640" height="200"></canvas>
 
@@ -79,8 +106,21 @@
   const fileInput = document.getElementById('file');
   const ditherSel = document.getElementById('dither');
   const downloadBtn = document.getElementById('download');
+  const resetBtn = document.getElementById('reset');
   const outCanvas = document.getElementById('out');
   const outCtx = outCanvas.getContext('2d');
+
+  // 前処理スライダー (-100..100, 0 = 無変換)
+  const sliders = {
+    brightness: document.getElementById('brightness'),
+    contrast:   document.getElementById('contrast'),
+    saturation: document.getElementById('saturation'),
+  };
+  const sliderVals = {
+    brightness: document.getElementById('brightnessVal'),
+    contrast:   document.getElementById('contrastVal'),
+    saturation: document.getElementById('saturationVal'),
+  };
 
   // 最後に読み込んだ元画像(640x200に縮小済み)を保持。
   // ディザ方式を変えたら再変換するため。
@@ -176,9 +216,45 @@
     }
   }
 
+  // 前処理: 明るさ・コントラスト・彩度を適用した新しい Uint8ClampedArray を返す。
+  // 元データ srcImageData は変更しない (スライダーを戻せるように)。
+  function preprocess(srcData) {
+    const b = +sliders.brightness.value;          // -100..100
+    const c = +sliders.contrast.value;            // -100..100
+    const s = +sliders.saturation.value;          // -100..100
+
+    const brightAdd = b * 255 / 100;              // 明るさは加算 (-255..255)
+    // コントラスト係数 (標準的な式)
+    const cf = (259 * (c + 255)) / (255 * (259 - c));
+    const satMul = 1 + s / 100;                   // 彩度倍率 (0..2)
+
+    const out = new Uint8ClampedArray(srcData.length);
+    for (let i = 0; i < srcData.length; i += 4) {
+      let r = srcData[i], g = srcData[i + 1], bl = srcData[i + 2];
+
+      // 明るさ
+      r += brightAdd; g += brightAdd; bl += brightAdd;
+      // コントラスト (128 中心)
+      r = cf * (r - 128) + 128;
+      g = cf * (g - 128) + 128;
+      bl = cf * (bl - 128) + 128;
+      // 彩度 (輝度を基準に拡縮)
+      const lum = 0.299 * r + 0.587 * g + 0.114 * bl;
+      r = lum + (r - lum) * satMul;
+      g = lum + (g - lum) * satMul;
+      bl = lum + (bl - lum) * satMul;
+
+      out[i]     = r;
+      out[i + 1] = g;
+      out[i + 2] = bl;
+      out[i + 3] = 255;
+    }
+    return out;
+  }
+
   function convert() {
     if (!srcImageData) return;
-    const src = srcImageData.data;
+    const src = preprocess(srcImageData.data);
     const dst = outCtx.createImageData(WIDTH, HEIGHT);
     const out = dst.data;
 
@@ -218,6 +294,23 @@
 
   // ディザ方式を変えたら同じ画像で再変換
   ditherSel.addEventListener('change', convert);
+
+  // スライダー: 値表示を更新して再変換
+  for (const key of Object.keys(sliders)) {
+    sliders[key].addEventListener('input', () => {
+      sliderVals[key].textContent = sliders[key].value;
+      convert();
+    });
+  }
+
+  // リセット: スライダーを 0 に戻して再変換
+  resetBtn.addEventListener('click', () => {
+    for (const key of Object.keys(sliders)) {
+      sliders[key].value = 0;
+      sliderVals[key].textContent = '0';
+    }
+    convert();
+  });
 
   downloadBtn.addEventListener('click', () => {
     const a = document.createElement('a');
