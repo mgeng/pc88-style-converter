@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PC-88 風 画像変換 (Step 5)</title>
+<title>PC-88 風 画像変換 (Step 6)</title>
 <style>
   body {
     background: #111;
@@ -60,10 +60,16 @@
 </style>
 </head>
 <body>
-  <h1>PC-88 風 画像変換 — Step 5 (走査線オーバーレイ追加)</h1>
+  <h1>PC-88 風 画像変換 — Step 6 (320x200 解像度オプション追加)</h1>
 
   <div class="controls">
     <input type="file" id="file" accept="image/*">
+    <label>解像度:
+      <select id="resolution">
+        <option value="640">640x200 (推奨)</option>
+        <option value="320">320x200 (低解像度)</option>
+      </select>
+    </label>
     <label>パレット:
       <select id="palette">
         <option value="digital">デジタル8色 (推奨)</option>
@@ -107,11 +113,13 @@
 (() => {
   'use strict';
 
-  const WIDTH = 640;
-  const HEIGHT = 200;
-  const DISP_HEIGHT = 400; // 表示高さ (縦長ドット再現のため HEIGHT x2)
+  const DISP_W = 640;
+  const DISP_H = 400;
+  let WIDTH = 640;   // 解像度モードで変わる (640 or 320)
+  let HEIGHT = 200;  // 解像度モードで変わる (200 のまま)
 
   const fileInput = document.getElementById('file');
+  const resSel = document.getElementById('resolution');
   const paletteSel = document.getElementById('palette');
   const ditherSel = document.getElementById('dither');
   const downloadBtn = document.getElementById('download');
@@ -139,8 +147,9 @@
     saturation: document.getElementById('saturationVal'),
   };
 
-  // 最後に読み込んだ元画像(640x200に縮小済み)を保持。
-  // ディザ方式を変えたら再変換するため。
+  // 元の Image オブジェクトを保持 (解像度変更時に再リサイズするため)
+  let srcImg = null;
+  // リサイズ済み ImageData (現在の WIDTH x HEIGHT)
   let srcImageData = null;
 
   // デジタル8色パレット (R/G/B 各 ON/OFF)
@@ -305,8 +314,10 @@
 
   function convert() {
     if (!srcImageData) return;
+    // オフスクリーンを現在の解像度に合わせる
+    offCanvas.width = WIDTH; offCanvas.height = HEIGHT;
     const src = preprocess(srcImageData.data);
-    const dst = outCtx.createImageData(WIDTH, HEIGHT);
+    const dst = offCtx.createImageData(WIDTH, HEIGHT);
     const out = dst.data;
 
     // パレット決定: デジタル8色固定 / 画像からアナログ8色抽出
@@ -328,31 +339,29 @@
     // ディザ結果をオフスクリーンへ書き込む
     offCtx.putImageData(dst, 0, 0);
 
-    // 表示キャンバスへ補間なしで縦2倍に描画 (縦長ドット再現)
+    // 表示キャンバスへ補間なしで縦2倍(320時は縦横2倍)に描画
     outCtx.imageSmoothingEnabled = false;
-    outCtx.drawImage(offCanvas, 0, 0, WIDTH, DISP_HEIGHT);
+    outCtx.drawImage(offCanvas, 0, 0, DISP_W, DISP_H);
 
     // 走査線オーバーレイ: 1px おきに半透明の黒帯を引く
     if (scanlineChk.checked) {
       const alpha = +scanlineSlider.value / 100;
       outCtx.fillStyle = `rgba(0,0,0,${alpha})`;
-      for (let y = 1; y < DISP_HEIGHT; y += 2) {
-        outCtx.fillRect(0, y, WIDTH, 1);
+      for (let y = 1; y < DISP_H; y += 2) {
+        outCtx.fillRect(0, y, DISP_W, 1);
       }
     }
 
     downloadBtn.disabled = false;
   }
 
-  // 元画像を 640x200 に縮小して ImageData を得る (一時 canvas を使用)
-  function resizeToImageData(img) {
+  // 元画像を現在の WIDTH x HEIGHT に縮小して ImageData を返す
+  function resizeToImageData() {
     const tmp = document.createElement('canvas');
-    tmp.width = WIDTH;
-    tmp.height = HEIGHT;
+    tmp.width = WIDTH; tmp.height = HEIGHT;
     const tctx = tmp.getContext('2d');
-    // 縮小時は平滑化して情報をならす (ディザが効きやすい)
     tctx.imageSmoothingEnabled = true;
-    tctx.drawImage(img, 0, 0, WIDTH, HEIGHT);
+    tctx.drawImage(srcImg, 0, 0, WIDTH, HEIGHT);
     return tctx.getImageData(0, 0, WIDTH, HEIGHT);
   }
 
@@ -361,11 +370,17 @@
     if (!file) return;
     const img = new Image();
     img.onload = () => {
-      srcImageData = resizeToImageData(img);
+      srcImg = img;
+      srcImageData = resizeToImageData();
       convert();
-      URL.revokeObjectURL(img.src);
     };
     img.src = URL.createObjectURL(file);
+  });
+
+  // 解像度変更: WIDTH を更新してリサイズし直してから再変換
+  resSel.addEventListener('change', () => {
+    WIDTH = resSel.value === '320' ? 320 : 640;
+    if (srcImg) { srcImageData = resizeToImageData(); convert(); }
   });
 
   // ディザ方式・パレット・走査線を変えたら同じ画像で再変換
