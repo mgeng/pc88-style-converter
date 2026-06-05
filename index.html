@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PC-88 風 画像変換 (Step 2)</title>
+<style>
+  body {
+    background: #111;
+    color: #ddd;
+    font-family: monospace;
+    margin: 0;
+    padding: 20px;
+  }
+  h1 { font-size: 18px; color: #6cf; }
+  .controls {
+    margin: 12px 0;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  button, input[type=file] {
+    font-family: monospace;
+    background: #222;
+    color: #ddd;
+    border: 1px solid #555;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  select {
+    font-family: monospace;
+    background: #222;
+    color: #ddd;
+    border: 1px solid #555;
+    padding: 6px 10px;
+  }
+  label { font-size: 13px; }
+  button:hover { background: #333; }
+  /* 出力キャンバスはくっきり拡大表示 (PC-88 のドット感) */
+  #out {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    border: 1px solid #444;
+    background: #000;
+    /* 640x200 を CSS で横1倍・縦2倍相当に見せる (縦長ドット再現) */
+    width: 640px;
+    height: 400px;
+    max-width: 100%;
+  }
+  .hint { color: #888; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>PC-88 風 画像変換 — Step 2 (デジタル8色 + ディザ方式切替)</h1>
+
+  <div class="controls">
+    <input type="file" id="file" accept="image/*">
+    <label>ディザ:
+      <select id="dither">
+        <option value="bayer">Bayer 4x4 (推奨)</option>
+        <option value="floyd">Floyd-Steinberg</option>
+        <option value="none">なし</option>
+      </select>
+    </label>
+    <button id="download" disabled>PNG 保存</button>
+  </div>
+  <p class="hint">画像を選ぶと 640x200・8色・ディザで変換し、縦2倍で表示します。</p>
+
+  <canvas id="out" width="640" height="200"></canvas>
+
+<script>
+(() => {
+  'use strict';
+
+  const WIDTH = 640;
+  const HEIGHT = 200;
+
+  const fileInput = document.getElementById('file');
+  const ditherSel = document.getElementById('dither');
+  const downloadBtn = document.getElementById('download');
+  const outCanvas = document.getElementById('out');
+  const outCtx = outCanvas.getContext('2d');
+
+  // 最後に読み込んだ元画像(640x200に縮小済み)を保持。
+  // ディザ方式を変えたら再変換するため。
+  let srcImageData = null;
+
+  // デジタル8色パレット (R/G/B 各 ON/OFF)
+  const PALETTE = [
+    [0, 0, 0],       // 黒
+    [0, 0, 255],     // 青
+    [255, 0, 0],     // 赤
+    [255, 0, 255],   // マゼンタ
+    [0, 255, 0],     // 緑
+    [0, 255, 255],   // シアン
+    [255, 255, 0],   // 黄
+    [255, 255, 255], // 白
+  ];
+
+  // Bayer 4x4 しきい値マトリクス (0..15 を -0.5..+0.5 のオフセットに使う)
+  const BAYER4 = [
+    [ 0,  8,  2, 10],
+    [12,  4, 14,  6],
+    [ 3, 11,  1,  9],
+    [15,  7, 13,  5],
+  ];
+
+  // デジタル8色は各チャンネル独立に 0/255 へ寄せるだけ。
+  // しきい値 (0..1) で 1ch を 0 か 255 に量子化する。
+  function quantizeChannel(value, threshold) {
+    // value: 0..255, threshold: 0..1
+    return (value / 255) > threshold ? 255 : 0;
+  }
+
+  // Bayer 4x4 順序付きディザ
+  function ditherBayer(src, out) {
+    for (let y = 0; y < HEIGHT; y++) {
+      for (let x = 0; x < WIDTH; x++) {
+        const i = (y * WIDTH + x) * 4;
+        // Bayer のしきい値 (0..1)。+0.5 で中心化。
+        const t = (BAYER4[y & 3][x & 3] + 0.5) / 16;
+        out[i]     = quantizeChannel(src[i],     t);
+        out[i + 1] = quantizeChannel(src[i + 1], t);
+        out[i + 2] = quantizeChannel(src[i + 2], t);
+        out[i + 3] = 255;
+      }
+    }
+  }
+
+  // ディザなし: 各チャンネル 128 を境に 0/255
+  function ditherNone(src, out) {
+    for (let i = 0; i < src.length; i += 4) {
+      out[i]     = quantizeChannel(src[i],     0.5);
+      out[i + 1] = quantizeChannel(src[i + 1], 0.5);
+      out[i + 2] = quantizeChannel(src[i + 2], 0.5);
+      out[i + 3] = 255;
+    }
+  }
+
+  // Floyd-Steinberg 誤差拡散ディザ
+  // 各チャンネルを 0/255 に量子化し、誤差を隣接ピクセルへ拡散する。
+  function ditherFloyd(src, out) {
+    // 計算用に float バッファへコピー (誤差を蓄積するため)
+    const buf = new Float32Array(WIDTH * HEIGHT * 3);
+    for (let p = 0, q = 0; p < src.length; p += 4, q += 3) {
+      buf[q]     = src[p];
+      buf[q + 1] = src[p + 1];
+      buf[q + 2] = src[p + 2];
+    }
+
+    const idx3 = (x, y) => (y * WIDTH + x) * 3;
+
+    for (let y = 0; y < HEIGHT; y++) {
+      for (let x = 0; x < WIDTH; x++) {
+        const q = idx3(x, y);
+        for (let c = 0; c < 3; c++) {
+          const oldV = buf[q + c];
+          const newV = oldV < 128 ? 0 : 255;
+          buf[q + c] = newV;
+          const err = oldV - newV;
+          // Floyd-Steinberg の重み (7,3,5,1)/16
+          if (x + 1 < WIDTH)                 buf[idx3(x + 1, y) + c]     += err * 7 / 16;
+          if (x - 1 >= 0 && y + 1 < HEIGHT)  buf[idx3(x - 1, y + 1) + c] += err * 3 / 16;
+          if (y + 1 < HEIGHT)                buf[idx3(x, y + 1) + c]     += err * 5 / 16;
+          if (x + 1 < WIDTH && y + 1 < HEIGHT) buf[idx3(x + 1, y + 1) + c] += err * 1 / 16;
+        }
+      }
+    }
+
+    for (let p = 0, q = 0; p < out.length; p += 4, q += 3) {
+      out[p]     = buf[q];
+      out[p + 1] = buf[q + 1];
+      out[p + 2] = buf[q + 2];
+      out[p + 3] = 255;
+    }
+  }
+
+  function convert() {
+    if (!srcImageData) return;
+    const src = srcImageData.data;
+    const dst = outCtx.createImageData(WIDTH, HEIGHT);
+    const out = dst.data;
+
+    switch (ditherSel.value) {
+      case 'floyd': ditherFloyd(src, out); break;
+      case 'none':  ditherNone(src, out);  break;
+      default:      ditherBayer(src, out); break;
+    }
+
+    outCtx.putImageData(dst, 0, 0);
+    downloadBtn.disabled = false;
+  }
+
+  // 元画像を 640x200 に縮小して ImageData を得る (一時 canvas を使用)
+  function resizeToImageData(img) {
+    const tmp = document.createElement('canvas');
+    tmp.width = WIDTH;
+    tmp.height = HEIGHT;
+    const tctx = tmp.getContext('2d');
+    // 縮小時は平滑化して情報をならす (ディザが効きやすい)
+    tctx.imageSmoothingEnabled = true;
+    tctx.drawImage(img, 0, 0, WIDTH, HEIGHT);
+    return tctx.getImageData(0, 0, WIDTH, HEIGHT);
+  }
+
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      srcImageData = resizeToImageData(img);
+      convert();
+      URL.revokeObjectURL(img.src);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+
+  // ディザ方式を変えたら同じ画像で再変換
+  ditherSel.addEventListener('change', convert);
+
+  downloadBtn.addEventListener('click', () => {
+    const a = document.createElement('a');
+    a.download = 'pc88.png';
+    a.href = outCanvas.toDataURL('image/png');
+    a.click();
+  });
+})();
+</script>
+</body>
+</html>
