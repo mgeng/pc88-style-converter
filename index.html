@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PC-88 風 画像変換 (Step 3)</title>
+<title>PC-88 風 画像変換 (Step 4)</title>
 <style>
   body {
     background: #111;
@@ -66,10 +66,16 @@
 </style>
 </head>
 <body>
-  <h1>PC-88 風 画像変換 — Step 3 (前処理スライダー追加)</h1>
+  <h1>PC-88 風 画像変換 — Step 4 (アナログ8色パレット追加)</h1>
 
   <div class="controls">
     <input type="file" id="file" accept="image/*">
+    <label>パレット:
+      <select id="palette">
+        <option value="digital">デジタル8色 (推奨)</option>
+        <option value="analog">アナログ8色 (自動抽出)</option>
+      </select>
+    </label>
     <label>ディザ:
       <select id="dither">
         <option value="bayer">Bayer 4x4 (推奨)</option>
@@ -104,6 +110,7 @@
   const HEIGHT = 200;
 
   const fileInput = document.getElementById('file');
+  const paletteSel = document.getElementById('palette');
   const ditherSel = document.getElementById('dither');
   const downloadBtn = document.getElementById('download');
   const resetBtn = document.getElementById('reset');
@@ -146,73 +153,107 @@
     [15,  7, 13,  5],
   ];
 
-  // デジタル8色は各チャンネル独立に 0/255 へ寄せるだけ。
-  // しきい値 (0..1) で 1ch を 0 か 255 に量子化する。
-  function quantizeChannel(value, threshold) {
-    // value: 0..255, threshold: 0..1
-    return (value / 255) > threshold ? 255 : 0;
+  // 与えられた RGB に最も近いパレット色を返す ([r,g,b])。
+  // palette は [r,g,b] の配列。距離は二乗ユークリッド。
+  function nearestColor(r, g, b, palette) {
+    let best = palette[0], bestD = Infinity;
+    for (let k = 0; k < palette.length; k++) {
+      const p = palette[k];
+      const dr = r - p[0], dg = g - p[1], db = b - p[2];
+      const d = dr * dr + dg * dg + db * db;
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
   }
 
-  // Bayer 4x4 順序付きディザ
-  function ditherBayer(src, out) {
+  // メディアンカット法で画像から代表 n 色を抽出する (アナログ風パレット)。
+  function medianCut(src, n) {
+    // ピクセルを [r,g,b] 配列として収集 (間引いて高速化)
+    const pixels = [];
+    for (let i = 0; i < src.length; i += 4 * 3) { // 3px おきにサンプリング
+      pixels.push([src[i], src[i + 1], src[i + 2]]);
+    }
+    let buckets = [pixels];
+    while (buckets.length < n) {
+      // 最も色の幅が広いバケツを選んで分割
+      let target = -1, targetRange = -1, targetCh = 0;
+      for (let bI = 0; bI < buckets.length; bI++) {
+        const bk = buckets[bI];
+        if (bk.length < 2) continue;
+        for (let c = 0; c < 3; c++) {
+          let mn = 255, mx = 0;
+          for (const px of bk) { if (px[c] < mn) mn = px[c]; if (px[c] > mx) mx = px[c]; }
+          const range = mx - mn;
+          if (range > targetRange) { targetRange = range; target = bI; targetCh = c; }
+        }
+      }
+      if (target < 0) break; // これ以上分割できない
+      const bk = buckets[target];
+      bk.sort((a, b) => a[targetCh] - b[targetCh]);
+      const mid = bk.length >> 1;
+      buckets.splice(target, 1, bk.slice(0, mid), bk.slice(mid));
+    }
+    // 各バケツの平均色をパレットにする
+    return buckets.map(bk => {
+      let r = 0, g = 0, b = 0;
+      for (const px of bk) { r += px[0]; g += px[1]; b += px[2]; }
+      const n = bk.length || 1;
+      return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+    });
+  }
+
+  // Bayer 4x4 順序付きディザ (任意パレット対応)
+  // 各チャンネルにしきい値オフセットを足してから最近色を選ぶ。
+  function ditherBayer(src, out, palette, amount) {
     for (let y = 0; y < HEIGHT; y++) {
       for (let x = 0; x < WIDTH; x++) {
         const i = (y * WIDTH + x) * 4;
-        // Bayer のしきい値 (0..1)。+0.5 で中心化。
-        const t = (BAYER4[y & 3][x & 3] + 0.5) / 16;
-        out[i]     = quantizeChannel(src[i],     t);
-        out[i + 1] = quantizeChannel(src[i + 1], t);
-        out[i + 2] = quantizeChannel(src[i + 2], t);
-        out[i + 3] = 255;
+        // -0.5..+0.5 のオフセット
+        const off = ((BAYER4[y & 3][x & 3] + 0.5) / 16 - 0.5) * amount;
+        const c = nearestColor(src[i] + off, src[i + 1] + off, src[i + 2] + off, palette);
+        out[i] = c[0]; out[i + 1] = c[1]; out[i + 2] = c[2]; out[i + 3] = 255;
       }
     }
   }
 
-  // ディザなし: 各チャンネル 128 を境に 0/255
-  function ditherNone(src, out) {
+  // ディザなし: そのまま最近色
+  function ditherNone(src, out, palette) {
     for (let i = 0; i < src.length; i += 4) {
-      out[i]     = quantizeChannel(src[i],     0.5);
-      out[i + 1] = quantizeChannel(src[i + 1], 0.5);
-      out[i + 2] = quantizeChannel(src[i + 2], 0.5);
-      out[i + 3] = 255;
+      const c = nearestColor(src[i], src[i + 1], src[i + 2], palette);
+      out[i] = c[0]; out[i + 1] = c[1]; out[i + 2] = c[2]; out[i + 3] = 255;
     }
   }
 
-  // Floyd-Steinberg 誤差拡散ディザ
-  // 各チャンネルを 0/255 に量子化し、誤差を隣接ピクセルへ拡散する。
-  function ditherFloyd(src, out) {
+  // Floyd-Steinberg 誤差拡散ディザ (任意パレット対応)
+  function ditherFloyd(src, out, palette) {
     // 計算用に float バッファへコピー (誤差を蓄積するため)
     const buf = new Float32Array(WIDTH * HEIGHT * 3);
     for (let p = 0, q = 0; p < src.length; p += 4, q += 3) {
-      buf[q]     = src[p];
-      buf[q + 1] = src[p + 1];
-      buf[q + 2] = src[p + 2];
+      buf[q] = src[p]; buf[q + 1] = src[p + 1]; buf[q + 2] = src[p + 2];
     }
 
     const idx3 = (x, y) => (y * WIDTH + x) * 3;
+    const spread = (x, y, er, eg, eb, w) => {
+      const q = idx3(x, y);
+      buf[q] += er * w; buf[q + 1] += eg * w; buf[q + 2] += eb * w;
+    };
 
     for (let y = 0; y < HEIGHT; y++) {
       for (let x = 0; x < WIDTH; x++) {
         const q = idx3(x, y);
-        for (let c = 0; c < 3; c++) {
-          const oldV = buf[q + c];
-          const newV = oldV < 128 ? 0 : 255;
-          buf[q + c] = newV;
-          const err = oldV - newV;
-          // Floyd-Steinberg の重み (7,3,5,1)/16
-          if (x + 1 < WIDTH)                 buf[idx3(x + 1, y) + c]     += err * 7 / 16;
-          if (x - 1 >= 0 && y + 1 < HEIGHT)  buf[idx3(x - 1, y + 1) + c] += err * 3 / 16;
-          if (y + 1 < HEIGHT)                buf[idx3(x, y + 1) + c]     += err * 5 / 16;
-          if (x + 1 < WIDTH && y + 1 < HEIGHT) buf[idx3(x + 1, y + 1) + c] += err * 1 / 16;
-        }
+        const c = nearestColor(buf[q], buf[q + 1], buf[q + 2], palette);
+        const er = buf[q] - c[0], eg = buf[q + 1] - c[1], eb = buf[q + 2] - c[2];
+        buf[q] = c[0]; buf[q + 1] = c[1]; buf[q + 2] = c[2];
+        // Floyd-Steinberg の重み (7,3,5,1)/16
+        if (x + 1 < WIDTH)                   spread(x + 1, y,     er, eg, eb, 7 / 16);
+        if (x - 1 >= 0 && y + 1 < HEIGHT)    spread(x - 1, y + 1, er, eg, eb, 3 / 16);
+        if (y + 1 < HEIGHT)                  spread(x,     y + 1, er, eg, eb, 5 / 16);
+        if (x + 1 < WIDTH && y + 1 < HEIGHT) spread(x + 1, y + 1, er, eg, eb, 1 / 16);
       }
     }
 
     for (let p = 0, q = 0; p < out.length; p += 4, q += 3) {
-      out[p]     = buf[q];
-      out[p + 1] = buf[q + 1];
-      out[p + 2] = buf[q + 2];
-      out[p + 3] = 255;
+      out[p] = buf[q]; out[p + 1] = buf[q + 1]; out[p + 2] = buf[q + 2]; out[p + 3] = 255;
     }
   }
 
@@ -258,10 +299,20 @@
     const dst = outCtx.createImageData(WIDTH, HEIGHT);
     const out = dst.data;
 
+    // パレット決定: デジタル8色固定 / 画像からアナログ8色抽出
+    let palette, amount;
+    if (paletteSel.value === 'analog') {
+      palette = medianCut(src, 8);
+      amount = 128; // アナログ色は間隔が狭いので Bayer 振れ幅は控えめ
+    } else {
+      palette = PALETTE;
+      amount = 255; // デジタル8色は立方体の頂点なので全幅で振る
+    }
+
     switch (ditherSel.value) {
-      case 'floyd': ditherFloyd(src, out); break;
-      case 'none':  ditherNone(src, out);  break;
-      default:      ditherBayer(src, out); break;
+      case 'floyd': ditherFloyd(src, out, palette); break;
+      case 'none':  ditherNone(src, out, palette);  break;
+      default:      ditherBayer(src, out, palette, amount); break;
     }
 
     outCtx.putImageData(dst, 0, 0);
@@ -292,8 +343,9 @@
     img.src = URL.createObjectURL(file);
   });
 
-  // ディザ方式を変えたら同じ画像で再変換
+  // ディザ方式・パレットを変えたら同じ画像で再変換
   ditherSel.addEventListener('change', convert);
+  paletteSel.addEventListener('change', convert);
 
   // スライダー: 値表示を更新して再変換
   for (const key of Object.keys(sliders)) {
